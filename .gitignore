@@ -1,0 +1,13 @@
+# secrets
+.env
+# local project data (client work must never be committed)
+projects/
+outputs/
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+# confidential reference files (client deliverables) - never commit
+reference_private/

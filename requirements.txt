@@ -1,0 +1,12 @@
+google-genai>=1.36
+pydantic>=2.7
+python-dotenv>=1.0
+streamlit>=1.40
+ddgs>=9.0
+primp>=0.15      # browser-like HTTP client (ships with ddgs)
+requests>=2.31
+beautifulsoup4>=4.12
+trafilatura>=1.12
+openpyxl>=3.1
+python-pptx>=1.0
+pytest>=8.0

@@ -56,26 +56,68 @@ The tool is vendor-independent by design. All business logic lives above an AI a
 
 **Current engine: Google Gemini API.** The free tier is used for development with dummy/public data only. Client-confidential data runs on the paid tier, where data is not used for model training.
 
+Web research runs through the tool's own search & scrape layer rather than Gemini's built-in
+Google Search grounding (not available on the current key's tier). This keeps sources under
+Datadvise control and makes every citation checkable.
+
 ## Getting started
 
 ```bash
-# clone the repo
-git clone <repo-url>
-cd competitive-analysis-automation
-
-# install dependencies
+git clone https://github.com/GHEASANDRINEMAWEN/Datadvice-Automated-competitive-anaylsis-tool.git
+cd Datadvice-Automated-competitive-anaylsis-tool
 pip install -r requirements.txt
 
-# configure environment
-cp .env.example .env
-# then edit .env and add your key:
-# GEMINI_API_KEY=your_key_here
+cp .env.example .env      # then set GEMINI_API_KEY=your_key_here
 
-# run
-python app.py
+python app.py             # opens the analyst app (Streamlit) in your browser
 ```
 
-> **Note:** never commit your `.env` file or API keys. Make sure `.gitignore` excludes it.
+> **Note:** `.env`, `projects/` (all engagement data and outputs) and `reference_private/`
+> (confidential reference deliverables) are git-ignored. Never commit keys or client data.
+
+### Command line (scripted runs / testing)
+
+```bash
+python -m ca_tool.cli new --client "DemoCo" --product "3D event diagramming software" \
+    --markets "hotels, event venues" --known "Cvent Event Diagramming,Matterport"
+python -m ca_tool.cli discover democo      # candidates + proposed features
+python -m ca_tool.cli approve democo --names "Matterport,EventDraw"   # Gate 1 shortcut
+python -m ca_tool.cli collect democo       # cited data collection
+python -m ca_tool.cli score democo         # 0–5 feature scores with evidence
+python -m ca_tool.cli synthesize democo    # SWOT, VoC, battlecards, insights
+python -m ca_tool.cli export democo        # Excel + insight deck + battlecards
+python -m ca_tool.cli status democo
+```
+
+Outputs are written to `projects/<id>/outputs/`.
+
+### Tests
+
+```bash
+python -m pytest tests     # offline: fake AI engine, no network or API quota used
+```
+
+## Code map
+
+```
+app.py                      analyst app: intake, Gate 1/2/3 review screens, export
+ca_tool/
+  models.py                 Cell = value + citations + confidence + review status
+  llm/                      AI abstraction layer (base.py) + Gemini engine (retry, timeout, model fallback)
+  research/web.py           search & scrape layer (the AI never browses; it reads pages we fetched)
+  research/corpus.py        numbered sources [S1].. + verbatim quote verification
+  knowledge/                scoring guide, template metrics ("What it means?"), credible-sources list
+  pipeline/                 discover → collect → score → synthesize, runner.py orchestrates
+  export/                   Excel (template layout), insight deck + battlecards (PPTX)
+docs/SCOPE.md               scope, process-step mapping, task list, known limitations
+docs/REFERENCE_PATTERNS.md  patterns learned from the Datadvise SOP, PDD and reference deliverables
+```
+
+### How citations are checked
+The AI only sees pages the research layer fetched, numbered `[S1]`, `[S2]`… Every value must
+cite a source and quote it verbatim. The tool then checks each quote against the fetched page
+text: verified quotes show ✅, unverified ones ⚠️ and force the cell's confidence to *low*.
+Customer quotes that can't be verified never reach the deck.
 
 ## Project status & roadmap
 

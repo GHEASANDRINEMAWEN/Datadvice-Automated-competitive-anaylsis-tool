@@ -66,6 +66,7 @@ class Candidate(BaseModel):
     name: str
     website: str = ""
     type: CompetitorType = "direct"
+    segment: str = ""                              # market segment it was found in
     justification: str = ""
     size_group: str = ""                           # e.g. "Enterprise (1000+ employees)"
     geography: str = ""
@@ -139,6 +140,7 @@ class Project(BaseModel):
     features: list[FeatureDef] = []
     competitors: list[CompetitorRecord] = []
     insights: Insights = Insights()
+    metrics: dict[str, float] = {}                 # machine seconds per stage (ROI tracking, PDD appendix)
     log: list[str] = []
     created_at: str = Field(default_factory=now)
     updated_at: str = Field(default_factory=now)

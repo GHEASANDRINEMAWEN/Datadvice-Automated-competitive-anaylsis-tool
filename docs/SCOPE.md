@@ -87,7 +87,8 @@ in the Prismm workbook/deck but are separate services; the architecture leaves r
 - [x] Excel export in the Competitive Analysis template layout
 - [x] Insight deck + battlecards (PPTX), using the reference deck's theme colours/fonts
 - [ ] Apply the house PPTX master/logo (needs a clean, non-confidential template file)
-- [ ] Side-by-side pilot vs the manual process; track ROI variables (PDD appendix)
+- [x] Side-by-side pilot vs the manual process; track ROI variables (PDD appendix) — see results below
+- [x] Market-map slide (competitive landscape by segment)
 
 ### Verification status (2026-09-28)
 - 22 offline tests pass (`python -m pytest tests`), incl. headless app tests of intake → Gate 1,
@@ -103,6 +104,27 @@ in the Prismm workbook/deck but are separate services; the architecture leaves r
   on 6 of 8 comparable features (others within 1–2 points).
 - Gate 2/3 screens render without errors but have only been exercised headlessly, not clicked
   through by an analyst on real data yet — first thing to do in the pilot.
+
+### Pilot vs a completed manual engagement (2026-09-29)
+Run with public inputs only (client's public website; no names or content from the confidential
+deliverables sent to the AI). Comparison done locally by `python -m ca_tool.pilot`; the detailed report
+stays in the git-ignored `projects/<id>/outputs/`.
+
+| Measure | Result |
+|---|---|
+| Competitor discovery recall | 5 of 15 manual competitors in one run (1 before segment-aware discovery); 8 of the 9 core competitors found across runs. The 6 misses outside the core were new-vertical/corporate players the analysts added from client context |
+| Overview facts (year, HQ, geographies, headcount) | 11 of 16 agree; every disagreement had a verified quote (product-vs-parent company, sources disagreeing, headcount at a different date) |
+| Feature scores on the analysts' own 43 features | 119 compared: 39% exact, 70% within 1 point → 74% after the unsupported-zero rule |
+| … with a verified evidence quote | **79% within 1 point, no bias** (mean gap 0.84) |
+| … without one | 39% within 1 point, 1.8 points too low |
+| Quotes verified | 96% (131/137) |
+| Turnaround, 5 competitors | 25 min machine time (16 of it discovery, inflated by free-tier congestion) vs 56–72 working hours manually |
+
+Changes made because of the pilot: segment-aware discovery; a second "alternatives to X" and
+completeness pass; client's former names excluded; search-result sources no longer truncated;
+a 0 score without verified evidence becomes "?" (not found ≠ absent); Gate 3 surfaces the scores
+that need checking first. Still weak: run-to-run variation in discovery; vendors never found by
+search (fix: analyst adds them at Gate 1, or a paid search API); thin-evidence competitors.
 
 ### Next up
 - Headless browser fetch for JS-rendered pricing pages (biggest data gap seen so far)

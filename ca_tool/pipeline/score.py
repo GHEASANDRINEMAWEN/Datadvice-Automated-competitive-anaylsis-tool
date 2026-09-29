@@ -76,9 +76,15 @@ SOURCES
             continue
         cites = corpus.resolve([Citation(source_id=c.source_id, quote=c.quote) for c in s.citations])
         val = None if s.score is None else float(max(0, min(5, s.score)))
-        conf = s.confidence if (any(c.verified for c in cites) or s.confidence == "unavailable") else "low"
+        verified = any(c.verified for c in cites)
+        rationale = s.rationale
+        if val == 0 and not verified:
+            # "not found" is not "absent" (scoring guide 0 = shown to be absent). The pilot showed
+            # unsupported zeros were the largest source of disagreement with analysts.
+            val, rationale = None, f"No evidence found either way — needs checking. (AI suggested 0: {s.rationale})"
+        conf = s.confidence if (verified or s.confidence == "unavailable") else "low"
         results.append(FeatureScore(feature=f.name, category=f.category, standard=s.standard, premium=s.premium,
-                                    enterprise=s.enterprise, score=val, rationale=s.rationale,
+                                    enterprise=s.enterprise, score=val, rationale=rationale,
                                     citations=cites, confidence=conf,
                                     analyst_note=f"Re-score: {feedback}" if feedback else ""))
     if feats and matched < len(feats) / 2:

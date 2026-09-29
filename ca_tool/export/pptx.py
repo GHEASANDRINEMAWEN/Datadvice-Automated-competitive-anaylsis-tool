@@ -114,6 +114,41 @@ def agenda(prs, p: Project, page: int) -> None:
     _box(s, Inches(0.6), Inches(1.4), Inches(12), Inches(5.5), "\n".join(f"{i + 1}.  {t}" for i, t in enumerate(items)), size=16)
 
 
+def market_map(prs, p: Project, page: int) -> int:
+    """Competitive landscape by market segment (PDD: market-map visual; reference deck's
+    'segmentation of companies' slide). Analysed competitors are highlighted."""
+    # the whole landscape found at Gate 1 (minus rejects), analysed competitors listed first
+    analysed = {r.name for r in p.competitors}
+    landscape = sorted((c for c in p.candidates if c.status != "rejected"), key=lambda c: c.name not in analysed)
+    by_seg: dict[str, list] = {}
+    for c in landscape:
+        by_seg.setdefault(c.segment or "Other", []).append(c)
+    if len(by_seg) < 2:
+        return page
+    s = _slide(prs, "Competitive landscape by market segment", page=page)
+    segs = list(by_seg.items())[:6]
+    n = len(segs)
+    gap = Inches(0.15)
+    w = int((Inches(12.3) - gap * (n - 1)) / n)
+    fills = [LAVENDER, MINT, SKY, AMBER, ORANGE, GREY]
+    for i, (seg, cands) in enumerate(segs):
+        x = Inches(0.5) + i * (w + gap)
+        _box(s, x, Inches(1.35), w, Inches(0.75), seg, size=11, bold=True, fill=fills[i % len(fills)])
+        extra = len(cands) - 8
+        for j, c in enumerate(cands[:8]):
+            y = Inches(2.25) + j * Inches(0.5)
+            box = _box(s, x, y, w, Inches(0.42), c.name, size=11, bold=c.name in analysed,
+                       fill=LIGHT if c.name in analysed else None)
+            if c.name in analysed:
+                box.line.color.rgb = INK
+        if extra > 0:
+            _box(s, x, Inches(2.25) + 8 * Inches(0.5), w, Inches(0.35), f"+ {extra} more", size=10)
+    _box(s, Inches(0.5), Inches(6.7), Inches(12), Inches(0.35),
+         "Bold, outlined = analysed in depth in this report; others were identified at Gate 1. "
+         "Segments proposed by the AI from the intake and confirmed at Gate 1.", size=10)
+    return page + 1
+
+
 def feature_matrix(prs, p: Project, page: int) -> int:
     """Category-average heat table (the reference workbook's category roll-up)."""
     cats = list(dict.fromkeys(f.category for f in p.features))
@@ -226,6 +261,7 @@ def export_deck(p: Project, path: Path) -> Path:
     for title, k in [("White Space & Competitive Gaps", "white_space"), ("Trends Across Competitors", "trends"),
                      (f"Strategic Implications for {p.intake.client_name}", "implications")]:
         bullets_slide(prs, title, getattr(p.insights, k), page); page += 1
+    page = market_map(prs, p, page)
     page = feature_matrix(prs, p, page)
     for rec in p.competitors:
         overview(prs, rec, page); page += 1

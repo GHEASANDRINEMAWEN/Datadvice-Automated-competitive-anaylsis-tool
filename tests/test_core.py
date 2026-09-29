@@ -288,3 +288,84 @@ def test_llm_waits_and_retries_when_all_models_busy(monkeypatch):
     g.GeminiLLM._cooldown.clear()
     assert llm.generate_text("hi") == "ok" and calls == ["m1", "m2", "m1"]
     g.GeminiLLM._cooldown.clear()
+
+
+def test_two_pass_discovery(monkeypatch):
+    """Segments -> first pass -> 'alternatives to X' pass adds only new vendors; client never listed."""
+    from ca_tool.pipeline import discover as d
+
+    pages = {"https://list.example/a": "Top tools: Acme Spaces builds interactive 3D floor plans for venues.",
+             "https://alt.example/b": "Alternatives to Acme include Niche Venue Co for hotels and venues."}
+    monkeypatch.setattr(d, "search", lambda q, max_results=8: [
+        web.SearchHit("t", "https://alt.example/b" if "alternatives competitors" in q else "https://list.example/a", "snippet")])
+    monkeypatch.setattr(d, "fetch", lambda u: web.Page(url=u, title="p", text=pages[u] * 20, links=[]))
+
+    class DiscLLM(FakeLLM):
+        def generate_json(self, prompt, schema, system=""):
+            n = schema.__name__
+            if n == "_SegmentsOut":
+                data = {"segments": [{"name": "3D diagramming", "why": "same buyers", "queries": ["best 3d tools"]}]}
+            elif n == "_DiscoveryOut" and "Already listed" in prompt:
+                sid = re.search(r"\[(D\d+)\][^\n]*\nURL: https://alt\.example/b", prompt).group(1)
+                data = {"candidates": [
+                    {"name": "Acme Spaces", "website": "", "type": "direct", "segment": "3D diagramming", "justification": "dup",
+                     "size_group": "", "geography": "", "citations": []},
+                    {"name": "Niche Venue Co", "website": "https://niche.example", "type": "direct", "segment": "3D diagramming",
+                     "justification": "specialist", "size_group": "", "geography": "",
+                     "citations": [{"source_id": sid, "quote": "Alternatives to Acme include Niche Venue Co"}]}]}
+            elif n == "_DiscoveryOut":
+                data = {"candidates": [
+                    {"name": "Acme Spaces", "website": "https://acme.example", "type": "direct", "segment": "3D diagramming",
+                     "justification": "3D floor plans", "size_group": "", "geography": "",
+                     "citations": [{"source_id": "D2", "quote": "Acme Spaces builds interactive 3D floor plans"}]},
+                    {"name": "Client", "website": "", "type": "direct", "segment": "", "justification": "self",
+                     "size_group": "", "geography": "", "citations": []}]}
+            else:
+                return super().generate_json(prompt, schema, system)
+            return schema.model_validate_json(json.dumps(data))
+
+    import re
+    p = Project(id="d", intake=Intake(client_name="Client", product="3D venue software", target_markets="hotels"))
+    out = d.find_competitors(p, DiscLLM())
+    assert [c.name for c in out] == ["Acme Spaces", "Niche Venue Co"]
+    assert out[0].segment == "3D diagramming" and out[0].citations[0].verified
+    assert out[1].citations and out[1].citations[0].verified
+
+
+def test_market_map_slide(tmp_path, corpus):
+    p = _full_project(corpus)
+    p.candidates = [Candidate(name="Acme", segment="3D diagramming", status="accepted"),
+                    Candidate(name="Beta", segment="Virtual tours", status="accepted"),
+                    Candidate(name="Gamma", segment="Virtual tours", status="accepted"),
+                    Candidate(name="Delta", segment="Venue booking", status="rejected")]
+    deck = Presentation(pptx.export_deck(p, tmp_path / "deck.pptx"))
+    slide = next(s for s in deck.slides if any(sh.has_text_frame and sh.text_frame.text == "Competitive landscape by market segment" for sh in s.shapes))
+    texts = [sh.text_frame.text for sh in slide.shapes if sh.has_text_frame]
+    assert {"3D diagramming", "Virtual tours", "Acme", "Gamma"} <= set(texts)
+    assert "Delta" not in texts and "Venue booking" not in texts   # rejected at Gate 1
+
+
+def test_client_aliases_are_excluded():
+    from ca_tool.pipeline.discover import client_aliases
+    c = Corpus(prefix="D")
+    c.add("https://g2.example/x", "t", "Prismm (formerly Allseated) is a world leader in spatial design. Other text " * 3)
+    c.add("https://b.example/y", "t", "Acme, formerly known as Beta Tools, sells floor plans. " * 3)
+    assert client_aliases(c, "Prismm") == {"allseated"}
+    assert client_aliases(c, "Acme") == {"beta tools"}
+    assert client_aliases(c, "") == set()
+
+
+def test_unsupported_zero_becomes_question_mark(corpus):
+    class Zero(FakeLLM):
+        def generate_json(self, prompt, schema, system=""):
+            data = {"scores": [
+                {"id": "F1", "feature": "Budgeting", "standard": None, "premium": None, "enterprise": None, "score": 0,
+                 "rationale": "not mentioned", "confidence": "medium", "citations": []},
+                {"id": "F2", "feature": "3D floor plans", "standard": False, "premium": False, "enterprise": False, "score": 0,
+                 "rationale": "absent", "confidence": "high",
+                 "citations": [{"source_id": "S1", "quote": "build interactive 3D floor plans"}]}]}
+            return schema.model_validate_json(json.dumps(data))
+    feats = [FeatureDef(category="Planning", name="Budgeting"), FeatureDef(category="Design", name="3D floor plans")]
+    out = {f.feature: f for f in score.score(_record(corpus), feats, Intake(client_name="C", product="p"), Zero())}
+    assert out["Budgeting"].score is None and "needs checking" in out["Budgeting"].rationale
+    assert out["3D floor plans"].score == 0          # a zero backed by verified evidence stands

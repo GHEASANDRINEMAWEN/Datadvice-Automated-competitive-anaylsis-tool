@@ -19,8 +19,10 @@ class Corpus:
         text = (text or "").strip()
         if not text or any(s.url == url for s in self.sources):
             return None
-        src = Source(id=f"{self.prefix}{len(self.sources) + 1}", url=url, title=title or url,
-                     kind=kind or classify(url)[0], text=text[: config.MAX_PAGE_CHARS])
+        kind = kind or classify(url)[0]
+        # a search-results source bundles many hits; the per-page cap would cut it to a handful
+        limit = config.MAX_SNIPPET_CHARS if kind == "search" else config.MAX_PAGE_CHARS
+        src = Source(id=f"{self.prefix}{len(self.sources) + 1}", url=url, title=title or url, kind=kind, text=text[:limit])
         self.sources.append(src)
         return src
 

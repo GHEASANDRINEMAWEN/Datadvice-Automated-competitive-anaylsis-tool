@@ -166,7 +166,7 @@ with tab1:
     if c2.button("🔎 Find competitors" if not p.candidates else "🔁 Re-run discovery", type="primary"):
         run_step("Discovering competitors", runner.discover, p, feedback=fb1)
     if p.candidates:
-        df = pd.DataFrame([{"status": c.status, "name": c.name, "website": c.website, "type": c.type,
+        df = pd.DataFrame([{"status": c.status, "name": c.name, "website": c.website, "type": c.type, "segment": c.segment,
                             "size group": c.size_group, "geography": c.geography, "justification": c.justification,
                             "verified cites": f"{sum(x.verified for x in c.citations)}/{len(c.citations)}",
                             "analyst note": c.analyst_note} for c in p.candidates])
@@ -192,6 +192,7 @@ with tab1:
                 changed = any(str(r[k] or "") != str(v or "") for k, v in
                               [("website", c.website), ("type", c.type), ("justification", c.justification)])
                 c.website, c.type, c.size_group = r["website"] or "", r["type"] or "direct", r["size group"] or ""
+                c.segment = r.get("segment") or ""
                 c.geography, c.justification, c.analyst_note = r["geography"] or "", r["justification"] or "", r["analyst note"] or ""
                 c.status = "edited" if changed and r["status"] in ("proposed", "accepted") else r["status"]
                 new.append(c)
@@ -299,11 +300,16 @@ with tab3:
             rec = p.record(name)
             if rec.features:
                 st.markdown("**Feature scores** — edit score/notes, set status; '?' = insufficient evidence")
+                needs = [f for f in rec.features if f.score is None or not any(c.verified for c in f.citations)]
+                st.caption(f"Check these {len(needs)} first: in the pilot, scores backed by a verified quote agreed with "
+                           "the analysts' scores 79% of the time (within 1 point); scores without one only 39%.")
+                only = st.checkbox(f"Show only the {len(needs)} scores that need checking", key=f"needs_{name}")
+                shown = needs if only else rec.features
                 fdf = pd.DataFrame([{"status": f.status, "category": f.category, "feature": f.feature,
                                      "score": f.score, "standard": f.standard, "premium": f.premium, "enterprise": f.enterprise,
                                      "confidence": f.confidence, "context note": f.rationale,
                                      "evidence": " | ".join(f"{'✓' if c.verified else '⚠'} {c.quote}" for c in f.citations)}
-                                    for f in rec.features])
+                                    for f in shown] or [{"status": "", "feature": "(none)"}])
                 fe = st.data_editor(fdf, hide_index=True, width="stretch", key=f"fs_{name}",
                                     column_config={"status": st.column_config.SelectboxColumn(options=["proposed", "accepted", "edited", "rejected"]),
                                                    "score": st.column_config.NumberColumn(min_value=0, max_value=5, step=0.5),
@@ -311,7 +317,7 @@ with tab3:
                                                    "confidence": st.column_config.TextColumn(disabled=True)})
                 c1, c2 = st.columns(2)
                 if c1.button("💾 Save scores", key=f"savefs_{name}"):
-                    for f, r in zip(rec.features, fe.to_dict("records")):
+                    for f, r in zip(shown, fe.to_dict("records")):
                         new_score = None if pd.isna(r["score"]) else float(r["score"])
                         if new_score != f.score or (r["context note"] or "") != f.rationale:
                             f.score, f.rationale, f.status = new_score, r["context note"] or "", "edited"

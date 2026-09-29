@@ -141,10 +141,19 @@ def _year(s: str) -> str:
 
 
 def _emp_range(s: str) -> tuple[float, float] | None:
-    nums = [float(x.replace(",", "")) for x in re.findall(r"\d[\d,]*", s or "")]
-    if not nums:
-        return None
-    return (min(nums), max(nums))
+    """Headcount as (low, high). Only an explicit range ('51-200', '1,000–5,000') or the figure
+    tied to 'employees'/'staff' counts; years and other numbers in the text are ignored."""
+    num = lambda x: float(x.replace(",", ""))
+    m = re.search(r"(\d[\d,]*)\s*(?:-|–|to)\s*(\d[\d,]*)", s or "")   # ranges first: "1001-2000"
+    if m:
+        return num(m.group(1)), num(m.group(2))
+    s = re.sub(r"\b(19|20)\d{2}\b", " ", s or "")           # then drop years, e.g. "(LinkedIn, 2024)"
+    m = re.search(r"(\d[\d,]*)\s*\+?\s*(?:employees|staff|people|team members)", s, re.I) or \
+        re.fullmatch(r"\D*(\d[\d,]*)\s*\+?\D*", s)
+    if m:
+        v = num(m.group(1))
+        return (v, v * 10 if "+" in s else v)
+    return None
 
 
 def fact_agrees(key: str, manual: str, tool: str) -> bool | None:
@@ -156,10 +165,20 @@ def fact_agrees(key: str, manual: str, tool: str) -> bool | None:
         a, b = _emp_range(manual), _emp_range(tool)
         if not a or not b:
             return None
-        # agree if ranges overlap or are within a factor of 2 (headcounts drift between research dates)
-        return a[0] <= b[1] * 2 and b[0] <= a[1] * 2
-    words = lambda x: set(re.findall(r"[a-z]{3,}", x.lower())) - {"usa", "united", "states"}
-    return bool(words(manual) & words(tool))
+        # strict: ranges must overlap; single figures within ±25% (a pilot must not flatter the tool)
+        if a[0] == a[1] and b[0] == b[1]:
+            return abs(a[0] - b[0]) <= 0.25 * max(a[0], b[0])
+        return a[0] <= b[1] and b[0] <= a[1]
+    generic = {"usa", "united", "states", "state", "the", "and", "with", "including", "countries", "region", "regions"}
+    words = lambda x: set(re.findall(r"[a-z]{3,}", x.lower())) - generic
+    m, t = words(manual), words(tool)
+    if key == "headquarters":
+        # the more specific place named in the manual value (the city: first word group) must appear
+        first = [w for w in re.findall(r"[a-z]{3,}", manual.lower().split(",")[0]) if w not in generic]
+        if first and len(manual.split(",")) > 1:
+            return all(w in t for w in first)
+        return bool(m) and m <= t
+    return bool(m & t)
 
 
 def compare(pid: str, baseline: dict) -> dict:
@@ -176,7 +195,7 @@ def compare(pid: str, baseline: dict) -> dict:
     new = [f for f in found if not any(same_company(f, m) for m in manual)]
 
     facts = []
-    for rec in p.competitors:
+    for rec in p.active():
         mname = next((m for m in baseline.get("overview", {}) if same_company(m, rec.name)), None)
         if not mname:
             continue
@@ -186,7 +205,7 @@ def compare(pid: str, baseline: dict) -> dict:
                           "verified": bool(cell and cell.verified), "agrees": fact_agrees(key, mval, cell.value if cell else "")})
 
     scores = []
-    for rec in p.competitors:
+    for rec in p.active():
         mname = next((m for m in baseline.get("scores", {}) if same_company(m, rec.name)), None)
         if not mname:
             continue

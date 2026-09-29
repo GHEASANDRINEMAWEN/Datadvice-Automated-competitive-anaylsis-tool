@@ -1,0 +1,8 @@
+# The app holds client data and spends the API key: only this computer may connect.
+[server]
+address = "localhost"
+headless = true
+
+[browser]
+gatherUsageStats = false
+serverAddress = "localhost"

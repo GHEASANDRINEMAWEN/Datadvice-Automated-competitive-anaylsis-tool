@@ -82,6 +82,11 @@ def _urls(*cells: Cell) -> list[str]:
     return [c.url for cell in cells if cell for c in cell.citations]
 
 
+def _ok(cell: Cell | None, default: str = "—") -> str:
+    """A cell's text for the client, or the default when it is missing, empty or rejected at a gate."""
+    return cell.value if cell and cell.value and cell.status != "rejected" else default
+
+
 def _val(rec: CompetitorRecord, key: str, limit: int = 400) -> str:
     c = rec.cells.get(key)
     if not c or c.status == "rejected":
@@ -110,7 +115,7 @@ def bullets_slide(prs, title: str, cell: Cell, page: int) -> None:
 def agenda(prs, p: Project, page: int) -> None:
     s = _slide(prs, "Contents", page=page)
     items = ["Executive Summary", "Insights: White Space, Trends, Implications", "Feature Comparison"]
-    items += [f"Competitor Analysis – {r.name}" for r in p.competitors]
+    items += [f"Competitor Analysis – {r.name}" for r in p.active()]
     _box(s, Inches(0.6), Inches(1.4), Inches(12), Inches(5.5), "\n".join(f"{i + 1}.  {t}" for i, t in enumerate(items)), size=16)
 
 
@@ -118,7 +123,7 @@ def market_map(prs, p: Project, page: int) -> int:
     """Competitive landscape by market segment (PDD: market-map visual; reference deck's
     'segmentation of companies' slide). Analysed competitors are highlighted."""
     # the whole landscape found at Gate 1 (minus rejects), analysed competitors listed first
-    analysed = {r.name for r in p.competitors}
+    analysed = {r.name for r in p.active()}
     landscape = sorted((c for c in p.candidates if c.status != "rejected"), key=lambda c: c.name not in analysed)
     by_seg: dict[str, list] = {}
     for c in landscape:
@@ -152,7 +157,7 @@ def market_map(prs, p: Project, page: int) -> int:
 def feature_matrix(prs, p: Project, page: int) -> int:
     """Category-average heat table (the reference workbook's category roll-up)."""
     cats = list(dict.fromkeys(f.category for f in p.features))
-    comps = p.competitors[:8]
+    comps = p.active()[:8]
     if not cats or not comps:
         return page
     s = _slide(prs, "Feature Comparison – average score by category (0–5)", page=page)
@@ -240,7 +245,7 @@ def voc(prs, rec: CompetitorRecord, page: int) -> int:
 def sources_slide(prs, p: Project, page: int) -> None:
     s = _slide(prs, "Sources", page=page)
     doms = {}
-    for rec in p.competitors:
+    for rec in p.active():
         for src in rec.sources:
             if not src.url.startswith("search://"):
                 doms.setdefault(domain(src.url), 0)
@@ -263,7 +268,7 @@ def export_deck(p: Project, path: Path) -> Path:
         bullets_slide(prs, title, getattr(p.insights, k), page); page += 1
     page = market_map(prs, p, page)
     page = feature_matrix(prs, p, page)
-    for rec in p.competitors:
+    for rec in p.active():
         overview(prs, rec, page); page += 1
         swot(prs, rec, page); page += 1
         page = voc(prs, rec, page)
@@ -276,21 +281,22 @@ def export_deck(p: Project, path: Path) -> Path:
 def export_battlecards(p: Project, path: Path) -> Path:
     """One-page battlecard per competitor for the client's sales / GTM team."""
     prs = _deck()
-    for i, rec in enumerate(p.competitors, 1):
+    for i, rec in enumerate(p.active(), 1):
         s = _slide(prs, f"Battlecard: {p.intake.client_name} vs {rec.name}",
-                   _urls(rec.cells.get("usvp"), rec.pricing.get("recurring_fees"), *rec.swot.values()), i)
+                   _urls(*(c for c in (rec.cells.get("usvp"), rec.pricing.get("recurring_fees"), *rec.swot.values())
+                          if c and c.status != "rejected")), i)
         _box(s, Inches(0.5), Inches(1.3), Inches(12.3), Inches(0.7),
              f"Who they are: {_val(rec, 'description', 260)}", size=11, fill=LAVENDER)
         cols = [("Their pitch", _val(rec, "usvp", 380), SKY),
-                ("Pricing", (rec.pricing.get("recurring_fees") or Cell(value="n.a.")).value[:300], GREY),
-                ("Where they're strong", (rec.swot.get("strengths") or Cell()).value[:450], MINT),
-                ("Where they're weak", (rec.swot.get("weaknesses") or Cell()).value[:450], AMBER)]
+                ("Pricing", _ok(rec.pricing.get("recurring_fees"), "n.a.")[:300], GREY),
+                ("Where they're strong", _ok(rec.swot.get("strengths"))[:450], MINT),
+                ("Where they're weak", _ok(rec.swot.get("weaknesses"))[:450], AMBER)]
         for j, (lab, text, colr) in enumerate(cols):
             x, y = Inches(0.5 + (j % 2) * 6.2), Inches(2.15 + (j // 2) * 1.75)
             _box(s, x, y, Inches(6.0), Inches(0.35), lab, size=12, bold=True, fill=colr)
             _box(s, x, y + Inches(0.35), Inches(6.0), Inches(1.35), text, size=9)
         _box(s, Inches(0.5), Inches(5.7), Inches(12.3), Inches(0.35), "How we win", size=12, bold=True, fill=INK, color=LIGHT)
-        _box(s, Inches(0.5), Inches(6.05), Inches(12.3), Inches(1.0), rec.battlecard.value[:600] or "—", size=10)
+        _box(s, Inches(0.5), Inches(6.05), Inches(12.3), Inches(1.0), _ok(rec.battlecard)[:600], size=10)
     path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(path)
     return path

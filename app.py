@@ -11,9 +11,13 @@ import sys
 
 if __name__ == "__main__" and "streamlit" not in sys.modules:
     import subprocess
-    sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", __file__, *sys.argv[1:]]))
+    # localhost only: the app holds client data and spends the API key (also set in .streamlit/config.toml,
+    # but that file is only read when started from the project folder)
+    sys.exit(subprocess.call([sys.executable, "-m", "streamlit", "run", __file__, "--server.address", "localhost",
+                              "--browser.gatherUsageStats", "false", *sys.argv[1:]]))
 
 import logging
+import os
 
 import pandas as pd
 import streamlit as st
@@ -45,6 +49,65 @@ def save(p: Project) -> None:
 
 def cite_md(cites) -> str:
     return "\n".join(f"- {'✅' if c.verified else '⚠️ unverified'} [{c.source_id}]({c.url}) “{c.quote}”" for c in cites) or "_no citation_"
+
+
+STATUSES = ("proposed", "accepted", "edited", "rejected")
+TYPES = ("direct", "indirect", "substitute")
+
+
+def txt(v) -> str:
+    """Table cells come back as None/NaN when empty; store them as ''."""
+    return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+
+
+def merge_candidates(p: Project, edited: pd.DataFrame) -> list[Candidate]:
+    """Apply the Gate 1 table. Rows are matched to candidates by a hidden id column (not by table
+    position: Streamlit re-uses positions when a row is deleted and another added in one edit), so a
+    rename keeps its citations and a new row never inherits another's. If a researched competitor's
+    name or website changes, its old research is dropped so it gets re-collected from the right source."""
+    orig = {c.uid: c for c in p.candidates}
+    out = []
+    for _, r in edited.iterrows():
+        name = txt(r.get("name"))
+        if not name:
+            continue
+        c = orig.get(txt(r.get("_id")))
+        is_new = c is None
+        c = Candidate(name=name, status="accepted") if is_new else c
+        old_name, old_site = c.name, c.website
+        site, ctype, just = txt(r.get("website")), txt(r.get("type")) or "direct", txt(r.get("justification"))
+        changed = not is_new and (name != old_name or site != old_site or ctype != c.type or just != c.justification)
+        c.name, c.website, c.type = name, site, ctype if ctype in TYPES else "direct"
+        c.segment, c.size_group, c.geography = txt(r.get("segment")), txt(r.get("size group")), txt(r.get("geography"))
+        c.justification, c.analyst_note = just, txt(r.get("analyst note"))
+        status = txt(r.get("status")) or ("accepted" if is_new else c.status)
+        status = status if status in STATUSES else "accepted"
+        c.status = "edited" if changed and status in ("proposed", "accepted") else status
+        if not is_new and (name != old_name or site != old_site) and p.record(old_name):
+            p.competitors = [x for x in p.competitors if x.name != old_name]
+            p.add_log(f"gate1: {old_name} renamed/re-pointed → research discarded, needs re-collection")
+        out.append(c)
+    return out
+
+
+def apply_score_edits(features, rows: list[dict]) -> None:
+    """Gate 3 table -> feature scores. An explicit 'rejected' always wins; otherwise a changed
+    score or note counts as an analyst edit."""
+    for f, r in zip(features, rows):
+        new_score = None if r.get("score") is None or pd.isna(r.get("score")) else float(r["score"])
+        note = txt(r.get("context note"))
+        chosen = txt(r.get("status")) or f.status
+        changed = new_score != f.score or note != f.rationale
+        if changed:
+            f.score, f.rationale = new_score, note
+        f.status = "rejected" if chosen == "rejected" else ("edited" if changed else chosen)
+
+
+def bump(pid: str, name: str) -> None:
+    """New widget keys for this competitor's Gate 2 form, so widgets show the data as it is now
+    (Streamlit widgets keep their old value per key even when the data underneath changes)."""
+    k = f"rev_{pid}_{name}"
+    st.session_state[k] = st.session_state.get(k, 0) + 1
 
 
 def run_step(label: str, fn, p: Project, **kw) -> None:
@@ -132,13 +195,13 @@ with tab0:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Candidates", len(p.candidates), f"{len(ok)} approved", delta_color="off")
     c2.metric("Features to compare", len(p.features))
-    allcells = [c for r in p.competitors for c in {**r.cells, **r.pricing}.values()]
+    allcells = [c for r in p.active() for c in {**r.cells, **r.pricing}.values()]
     allcites = [x for c in allcells for x in c.citations]
     c3.metric("Quotes verified", f"{sum(x.verified for x in allcites)}/{len(allcites)}" if allcites else "—")
     c4.metric("Fields awaiting review", sum(1 for c in allcells if c.status == "proposed"))
-    if p.competitors:
+    if p.active():
         rows = []
-        for r in p.competitors:
+        for r in p.active():
             cells = {**r.cells, **r.pricing}
             cs = [x for c in cells.values() for x in c.citations]
             scored = [f for f in r.features if f.score is not None]
@@ -166,12 +229,13 @@ with tab1:
     if c2.button("🔎 Find competitors" if not p.candidates else "🔁 Re-run discovery", type="primary"):
         run_step("Discovering competitors", runner.discover, p, feedback=fb1)
     if p.candidates:
-        df = pd.DataFrame([{"status": c.status, "name": c.name, "website": c.website, "type": c.type, "segment": c.segment,
+        df = pd.DataFrame([{"_id": c.uid, "status": c.status, "name": c.name, "website": c.website, "type": c.type, "segment": c.segment,
                             "size group": c.size_group, "geography": c.geography, "justification": c.justification,
                             "verified cites": f"{sum(x.verified for x in c.citations)}/{len(c.citations)}",
                             "analyst note": c.analyst_note} for c in p.candidates])
         edited = st.data_editor(df, hide_index=True, width="stretch", num_rows="dynamic", key="cand_ed",
-                                column_config={"status": st.column_config.SelectboxColumn(options=["proposed", "accepted", "edited", "rejected"]),
+                                column_config={"_id": None,  # hidden: ties each row to its candidate
+                                               "status": st.column_config.SelectboxColumn(options=["proposed", "accepted", "edited", "rejected"]),
                                                "type": st.column_config.SelectboxColumn(options=["direct", "indirect", "substitute"]),
                                                "verified cites": st.column_config.TextColumn(disabled=True)})
         with st.expander("Evidence for each candidate"):
@@ -183,22 +247,9 @@ with tab1:
         fed = st.data_editor(fdf, hide_index=True, width="stretch", num_rows="dynamic", key="feat_ed")
         c1, c2 = st.columns(2)
         if c1.button("💾 Save scope"):
-            old = {c.name: c for c in p.candidates}
-            new = []
-            for r in edited.to_dict("records"):
-                if not r.get("name"):
-                    continue
-                c = old.get(r["name"]) or Candidate(name=r["name"], status="accepted")
-                changed = any(str(r[k] or "") != str(v or "") for k, v in
-                              [("website", c.website), ("type", c.type), ("justification", c.justification)])
-                c.website, c.type, c.size_group = r["website"] or "", r["type"] or "direct", r["size group"] or ""
-                c.segment = r.get("segment") or ""
-                c.geography, c.justification, c.analyst_note = r["geography"] or "", r["justification"] or "", r["analyst note"] or ""
-                c.status = "edited" if changed and r["status"] in ("proposed", "accepted") else r["status"]
-                new.append(c)
-            p.candidates = new
-            p.features = [FeatureDef(**{k: (r[k] or "") for k in ("category", "name", "description")})
-                          for r in fed.to_dict("records") if r.get("name")]
+            p.candidates = merge_candidates(p, edited)
+            p.features = [FeatureDef(**{k: txt(r.get(k)) for k in ("category", "name", "description")})
+                          for r in fed.to_dict("records") if txt(r.get("name"))]
             p.add_log("gate1: scope saved")
             save(p)
             st.success("Saved.")
@@ -220,9 +271,11 @@ with tab2:
         c1.write(f"{len(ok)} approved competitors · {len(ok) - len(missing)} researched")
         if missing and c2.button(f"🔎 Research {len(missing)} competitor(s)", type="primary"):
             run_step("Collecting data", runner.collect, p)
-        if p.competitors:
-            name = st.selectbox("Competitor", [r.name for r in p.competitors], key="g2comp")
+        if p.active():
+            name = st.selectbox("Competitor", [r.name for r in p.active()], key="g2comp")
             rec = p.record(name)
+            rev = st.session_state.get(f"rev_{p.id}_{name}", 0)
+            wk = f"{p.id}_{name}_{rev}"  # project + competitor + version: no stale or cross-project values
             cells = {**rec.cells, **rec.pricing}
             allc = [c for cell in cells.values() for c in cell.citations]
             st.caption(f"{len(rec.sources)} sources · {sum(c.verified for c in allc)}/{len(allc)} quotes verified · "
@@ -232,6 +285,7 @@ with tab2:
                     if cell.status == "proposed" and cell.verified:
                         cell.status = "accepted"
                 save(p)
+                bump(p.id, name)
                 st.rerun()
             show = st.radio("Show", ["All fields", "Needs attention (low confidence / unavailable)"], horizontal=True, key=f"show_{name}")
             with st.form(f"g2_{name}"):
@@ -243,10 +297,10 @@ with tab2:
                     st.markdown(f"**{m.label}** · {CONF_BADGE[cell.confidence]} · _{cell.status}_  \n<small>{m.question}</small>",
                                 unsafe_allow_html=True)
                     c1, c2 = st.columns([3, 1])
-                    val = c1.text_area(m.label, cell.value, key=f"v_{name}_{m.key}", label_visibility="collapsed", height=90)
-                    status = c2.radio("Decision", ["proposed", "accepted", "rejected"], key=f"s_{name}_{m.key}", horizontal=False,
+                    val = c1.text_area(m.label, cell.value, key=f"v_{wk}_{m.key}", label_visibility="collapsed", height=90)
+                    status = c2.radio("Decision", ["proposed", "accepted", "rejected"], key=f"s_{wk}_{m.key}", horizontal=False,
                                       index=["proposed", "accepted", "rejected"].index(cell.status if cell.status != "edited" else "accepted"))
-                    rerun = c2.checkbox("Send back", key=f"r_{name}_{m.key}")
+                    rerun = c2.checkbox("Send back", key=f"r_{wk}_{m.key}")
                     with st.expander("Evidence" + (f" · note: {cell.note}" if cell.note else "")):
                         st.markdown(cite_md(cell.citations))
                     decisions[m.key] = (val, status, rerun)
@@ -269,13 +323,15 @@ with tab2:
                         collect_mod.rerun(rec, p.intake, keys, fb2, llm())
                     p.add_log(f"gate2: re-ran {keys} for {name}: {fb2}")
                     save(p)
+                bump(p.id, name)
                 st.rerun()
             with st.expander(f"All {len(rec.sources)} sources"):
                 st.markdown("\n".join(f"- [{s.id}] ({s.kind}) [{s.title[:90]}]({s.url})" for s in rec.sources if not s.url.startswith("search://")))
             if st.button("🔁 Re-research this competitor from scratch"):
+                bump(p.id, name)
                 run_step(f"Re-collecting {name}", runner.collect, p, names=[name])
-        if p.competitors and not missing:
-            pending = sum(1 for r in p.competitors for c in {**r.cells, **r.pricing}.values() if c.status == "proposed")
+        if p.active() and not missing:
+            pending = sum(1 for r in p.active() for c in {**r.cells, **r.pricing}.values() if c.status == "proposed")
             if st.button(f"✅ Approve data → Gate 2 complete ({pending} cells still unreviewed)"):
                 p.stage = "synthesis"
                 p.add_log(f"GATE 2 approved ({pending} cells unreviewed)")
@@ -295,8 +351,8 @@ with tab3:
             run_step("Synthesising", runner.synthesize, p, feedback=fb3)
         with st.expander("Datadvise Feature Scoring Guide"):
             st.text(guide_text())
-        if p.competitors:
-            name = st.selectbox("Competitor", [r.name for r in p.competitors], key="g3comp")
+        if p.active():
+            name = st.selectbox("Competitor", [r.name for r in p.active()], key="g3comp")
             rec = p.record(name)
             if rec.features:
                 st.markdown("**Feature scores** — edit score/notes, set status; '?' = insufficient evidence")
@@ -317,12 +373,7 @@ with tab3:
                                                    "confidence": st.column_config.TextColumn(disabled=True)})
                 c1, c2 = st.columns(2)
                 if c1.button("💾 Save scores", key=f"savefs_{name}"):
-                    for f, r in zip(shown, fe.to_dict("records")):
-                        new_score = None if pd.isna(r["score"]) else float(r["score"])
-                        if new_score != f.score or (r["context note"] or "") != f.rationale:
-                            f.score, f.rationale, f.status = new_score, r["context note"] or "", "edited"
-                        else:
-                            f.status = r["status"]
+                    apply_score_edits(shown, fe.to_dict("records"))
                     save(p)
                     st.success("Saved.")
                 if c2.button("🔁 Re-score this competitor with feedback", key=f"rs_{name}"):
@@ -374,10 +425,14 @@ with tab4:
         if stage != "export":
             p.stage = stage  # a draft export does not advance the workflow
         save(p)
-        st.session_state.exports = [str(x) for x in paths]
-    for path in st.session_state.get("exports", []):
+        # keyed by project: another client's files must never be offered here
+        st.session_state.setdefault("exports", {})[p.id] = [str(x) for x in paths]
+    for path in st.session_state.get("exports", {}).get(p.id, []):
+        if not os.path.exists(path):
+            continue
+        fname = os.path.basename(path)
         with open(path, "rb") as fh:
-            st.download_button(f"⬇️ {path.split(chr(92))[-1].split('/')[-1]}", fh.read(), file_name=path.split(chr(92))[-1].split("/")[-1])
+            st.download_button(f"⬇️ {fname}", fh.read(), file_name=fname, key=f"dl_{p.id}_{fname}")
 
 with tab5:
     st.code("\n".join(reversed(p.log)) or "(empty)")

@@ -48,7 +48,7 @@ def _discover_impl(p: Project, llm: LLM, names, feedback: str, progress: Progres
     progress("Searching and reading sources for competitors…")
     p.candidates += _discover.find_competitors(p, llm, feedback=feedback, progress=progress)
     progress(f"{len(p.candidates)} candidates. Proposing comparison features…")
-    if not p.features or feedback:
+    if not p.features:  # never overwrite a feature list the analyst may have edited at Gate 1
         p.features = _discover.propose_features(p, llm)
     p.stage = "gate1"
     store.save(p)
@@ -57,16 +57,21 @@ def _discover_impl(p: Project, llm: LLM, names, feedback: str, progress: Progres
 def reverify(p: Project) -> int:
     """Re-run the quote check on every stored citation (cheap, no network). Keeps old projects
     consistent after verifier improvements. Returns how many flags changed."""
-    from ..research.corpus import quote_in_text
+    from ..research.corpus import numbers_supported, verify
     changed = 0
+    flag = "⚠️ The figure in this value does not appear in the quoted evidence — check it."
     for rec in p.competitors:
         cites = [c for cell in [*rec.cells.values(), *rec.pricing.values(), *rec.swot.values()] for c in cell.citations]
         cites += [c for f in rec.features for c in f.citations]
         for c in cites:
-            src = rec.source(c.source_id)
-            ok = bool(src) and quote_in_text(c.quote, src.text)
+            ok = verify(rec.source(c.source_id), c.quote)
             if ok != c.verified:
                 c.verified, changed = ok, changed + 1
+        # a verified quote must also back the figure in the value (only unreviewed cells are touched)
+        for cell in (*rec.cells.values(), *rec.pricing.values()):
+            if cell.confidence in ("high", "medium") and cell.status == "proposed" and flag not in cell.note and \
+                    numbers_supported(cell.value, [c.quote for c in cell.citations if c.verified]) is False:
+                cell.confidence, cell.note, changed = "low", f"{flag} {cell.note}".strip(), changed + 1
     return changed
 
 
@@ -108,7 +113,7 @@ def score(p: Project, llm: LLM, names=None, feedback: str = "", progress: Progre
 
 
 def _score_impl(p: Project, llm: LLM, names, feedback: str, progress: Progress) -> None:
-    for rec in p.competitors:
+    for rec in p.active():
         if names and rec.name not in names:
             continue
         progress(f"Scoring features for {rec.name}…")
@@ -134,7 +139,7 @@ def synthesize(p: Project, llm: LLM, names=None, feedback: str = "", progress: P
 
 
 def _synthesize_impl(p: Project, llm: LLM, names, feedback: str, progress: Progress) -> None:
-    for rec in p.competitors:
+    for rec in p.active():
         if names and rec.name not in names:
             continue
         progress(f"SWOT, Voice of Customer and battlecard for {rec.name}…")
@@ -165,7 +170,7 @@ def export(p: Project) -> list[Path]:
 
 def roi(p: Project) -> dict:
     """ROI tracking variables (PDD appendix) and the README success measures, from project data."""
-    comps = p.competitors
+    comps = p.active()
     cells = [c for r in comps for c in (*r.cells.values(), *r.pricing.values())]
     cites = [x for c in cells for x in c.citations]
     feats = [f for r in comps for f in r.features if f.score is not None]

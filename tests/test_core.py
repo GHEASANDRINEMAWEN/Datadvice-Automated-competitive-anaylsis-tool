@@ -369,3 +369,256 @@ def test_unsupported_zero_becomes_question_mark(corpus):
     out = {f.feature: f for f in score.score(_record(corpus), feats, Intake(client_name="C", product="p"), Zero())}
     assert out["Budgeting"].score is None and "needs checking" in out["Budgeting"].rationale
     assert out["3D floor plans"].score == 0          # a zero backed by verified evidence stands
+
+
+def test_pilot_fact_matching_is_strict():
+    from ca_tool.pilot import fact_agrees as f, same_company
+    assert f("headquarters", "Portland, Oregon US", "Carlton, Oregon, United States") is False   # same state, other city
+    assert f("headquarters", "Tysons, Virginia, US", "Tysons, Virginia, USA") is True
+    assert f("headquarters", "New York, US", "United States") is False                           # less specific
+    assert f("employees", "11-50", "51-200") is False                                            # adjacent bands differ
+    assert f("employees", "500-1000", "501-1000") is True
+    assert f("employees", "3,601", "5,500+") is False
+    assert f("founding_year", "2009", "2011") is False
+    assert f("founding_year", "2011", "Undisclosed") is None
+    assert same_company("Social Tables (Acquired by Cvent)", "Social Tables") and not same_company("Cvent", "Merri")
+
+
+def test_figures_must_appear_in_the_evidence():
+    from ca_tool.research.corpus import numbers_supported
+    assert numbers_supported("2011", ["Matterport pioneered 3D digital twins"]) is False      # real quote, no year
+    assert numbers_supported("Founded in 2011", ["Matterport, founded in 2011, ..."]) is True
+    assert numbers_supported("Solo ($9/mo), Pro ($18/mo)", ["Solo Plan $9.00... Pro Plan $18.00"]) is True
+    assert numbers_supported("3,601 employees", ["a team of 3601 people"]) is True
+    assert numbers_supported("Worldwide", ["global presence"]) is None                       # nothing to check
+
+
+def test_extract_downgrades_unsupported_figure(corpus):
+    class Mem(FakeLLM):
+        def generate_json(self, prompt, schema, system=""):
+            data = {"values": [{"key": "founding_year", "value": "2012", "confidence": "high", "note": "",
+                                "citations": [{"source_id": "S1", "quote": "build interactive 3D floor plans"}]},
+                               {"key": "headquarters", "value": "Austin, Texas", "confidence": "high", "note": "",
+                                "citations": [{"source_id": "S1", "quote": "headquartered in Austin, Texas"}]}]}
+            return schema.model_validate_json(json.dumps(data))
+    from ca_tool.knowledge.template import METRIC_BY_KEY
+    cells = collect.extract("Acme", Intake(client_name="C", product="p"), corpus,
+                            [METRIC_BY_KEY["founding_year"], METRIC_BY_KEY["headquarters"]], Mem())
+    assert cells["founding_year"].verified and cells["founding_year"].confidence == "low"
+    assert "does not appear in the quoted evidence" in cells["founding_year"].note
+    assert cells["headquarters"].confidence == "high"
+
+
+def test_quote_checker_rejects_adversarial_quotes():
+    page = ("Acme offers a free plan for small businesses. Our support team is available by email "
+            "and the company raised money from investors in a round led by well known firms last spring.")
+    # invented ending after a real opening
+    assert not quote_in_text("Acme offers a free plan for enterprises with unlimited SSO", page)
+    # tiny fragments joined by ellipses, matching inside other words
+    assert not quote_in_text("Best ... in ... class ... support", "The best tools in the classroom need support staff")
+    # an invented middle section in a long quote
+    assert not quote_in_text("the company raised 500 million dollars from investors in a round led by well known firms", page)
+    # no word may differ, even in a long quote (one-word edits flipped meaning in review)
+    assert not quote_in_text("the company raised funds from investors in a round led by well known firms last spring", page)
+    assert quote_in_text("the company raised money from investors in a round led by well known firms last spring", page)
+    # whole words only
+    assert not quote_in_text("free plan for small business", page.replace("businesses", "businesspeople"))
+
+
+def test_search_bundle_quotes_cannot_be_stitched():
+    c = Corpus()
+    c.add("search://X", "results", "- A: Acme builds interactive floor plans for venues (https://a.example/1)\n"
+                                   "- B: Beta raised forty million dollars last year (https://b.example/2)")
+    stitched = c.resolve([Citation(source_id="S1", quote="Acme builds interactive floor plans for venues B Beta raised forty million")])[0]
+    single = c.resolve([Citation(source_id="S1", quote="Beta raised forty million dollars last year")])[0]
+    assert not stitched.verified
+    assert single.verified and single.url == "https://b.example/2"
+
+
+def test_short_quotes_need_a_figure():
+    page = "Company profile. Founded: 2011. Employees: 51-200. Standard onboarding is included."
+    assert quote_in_text("Founded: 2011", page) and quote_in_text("Employees: 51-200", page)
+    assert not quote_in_text("Founded: 2012", page)
+    assert not quote_in_text("Standard onboarding", page)      # short and no figure: could match anywhere
+    assert not quote_in_text("2011", page)
+
+
+def test_excel_is_safe_against_formulas_and_control_chars(tmp_path, corpus):
+    p = _full_project(corpus)
+    rec = p.competitors[0]
+    rec.cells["description"].value = '=HYPERLINK("http://evil.example","click")'
+    rec.cells["usvp"].value = "bad\x0bchar\x0c here"
+    rec.sources[0].title = "@SUM(A1:A9)"
+    path = excel.export(p, tmp_path / "safe.xlsx")           # must not raise
+    wb = load_workbook(path)
+    cells = [c for ws in wb.worksheets for row in ws.iter_rows() for c in row]
+    assert not any(c.data_type == "f" for c in cells)
+    ca = wb["Company Analysis"]
+    desc = next(r for r in range(4, 60) if ca.cell(r, 2).value == "Description")
+    assert ca.cell(desc, 4).value.startswith("=HYPERLINK")    # kept as visible text, not executed
+    usvp = next(r for r in range(4, 60) if ca.cell(r, 2).value.startswith("Unique Selling"))
+    assert ca.cell(usvp, 4).value == "badchar here"
+
+
+def test_scores_never_land_on_the_wrong_feature(corpus):
+    """Reviewer's case: ids '1','2' with AI omitted -> AI must be '?', not Email marketing's score."""
+    class Shifted(FakeLLM):
+        def generate_json(self, prompt, schema, system=""):
+            mk = lambda i, name, sc: {"id": i, "feature": name, "standard": True, "premium": None, "enterprise": None,
+                                     "score": sc, "rationale": "r", "confidence": "high",
+                                     "citations": [{"source_id": "S1", "quote": "build interactive 3D floor plans"}]}
+            data = {"scores": [mk("1", "Email marketing", 4), mk("F03", "Reporting", 3), mk("F3", "Reporting", 5)]}
+            return schema.model_validate_json(json.dumps(data))
+    feats = [FeatureDef(category="X", name="AI"), FeatureDef(category="X", name="Email marketing"),
+             FeatureDef(category="X", name="Reporting")]
+    out = {f.feature: f.score for f in score.score(_record(corpus), feats, Intake(client_name="C", product="p"), Shifted())}
+    assert out == {"AI": None, "Email marketing": 4.0, "Reporting": 3.0}
+
+
+def test_rejected_content_never_reaches_deliverables(tmp_path, corpus):
+    p = _full_project(corpus)
+    p.candidates = [Candidate(name="Acme", status="accepted"), Candidate(name="Beta", status="rejected")]
+    p.competitors[0].swot["strengths"].status = "rejected"
+    p.competitors[0].swot["strengths"].value = "SECRET WRONG STRENGTH"
+    wb = load_workbook(excel.export(p, tmp_path / "x.xlsx"))
+    assert [c.value for c in wb["Company Analysis"][2]][3:] == ["Acme"]            # Beta rejected after research
+    texts = lambda prs: " ".join(sh.text_frame.text for s in prs.slides for sh in s.shapes if sh.has_text_frame)
+    deck = texts(Presentation(pptx.export_deck(p, tmp_path / "d.pptx")))
+    cards = texts(Presentation(pptx.export_battlecards(p, tmp_path / "c.pptx")))
+    assert "Beta" not in deck and "Beta" not in cards
+    assert "SECRET WRONG STRENGTH" not in deck and "SECRET WRONG STRENGTH" not in cards
+
+
+def test_pilot_headcount_ignores_years_and_other_numbers():
+    from ca_tool.pilot import fact_agrees as f
+    assert f("employees", "1,000-5,000", "~200 employees (LinkedIn, 2024)") is False
+    assert f("employees", "51-200", "1,200 employees across 3 offices") is False
+    assert f("employees", "51-200", "About 120 employees (2025)") is True
+    assert f("employees", "3,601", "3,500 employees") is True
+
+
+def _fake_client(behaviour):
+    """behaviour(model, n) -> text to return, or an exception to raise."""
+    from google.genai import errors
+    calls = []
+
+    class Models:
+        def generate_content(self, model, contents, config):
+            calls.append(model)
+            out = behaviour(model, len(calls))
+            if isinstance(out, Exception):
+                raise out
+            part = type("P", (), {"text": out})()
+            cand = type("C", (), {"content": type("X", (), {"parts": [part]})()})()
+            return type("R", (), {"candidates": [cand]})()
+    return type("Cl", (), {"models": Models()})(), calls, errors
+
+
+def test_llm_error_handling():
+    from pydantic import BaseModel
+    from ca_tool.llm import gemini as g
+    from ca_tool.llm.base import LLMError
+
+    class Out(BaseModel):
+        x: int
+
+    g.GeminiLLM._cooldown.clear()
+    # 400 on m1 -> next model is tried and m1 is NOT benched for later calls
+    client, calls, errors = _fake_client(lambda m, n: errors.APIError(400, {"error": {"code": 400, "message": "bad", "status": "INVALID_ARGUMENT"}}) if m == "m1" else '{"x": 1}')
+    llm = g.GeminiLLM(api_key="k", models=["m1", "m2"], retries=2, round_wait=0)
+    llm.client = client
+    assert llm.generate_json("p", Out).x == 1 and "m1" not in g.GeminiLLM._cooldown
+    # malformed JSON twice -> LLMError (not a pydantic traceback)
+    client, calls, _ = _fake_client(lambda m, n: "not json")
+    llm.client = client
+    with pytest.raises(LLMError):
+        llm.generate_json("p", Out)
+    # empty reply: each model asked once per pass, no waiting round
+    client, calls, _ = _fake_client(lambda m, n: "")
+    llm.client = client
+    with pytest.raises(LLMError):
+        llm.generate_text("p")
+    assert calls == ["m1", "m2"]
+    g.GeminiLLM._cooldown.clear()
+
+
+def test_gate1_merge_handles_new_rows_renames_and_repointing(tmp_path, monkeypatch, corpus):
+    import importlib, sys, types
+    import pandas as pd
+    # import merge_candidates from app.py without running the Streamlit script
+    src = open("app.py", encoding="utf-8").read()
+    start, end = src.index("STATUSES = ("), src.index("def bump(")
+    ns = {"pd": pd, "Candidate": Candidate, "Project": Project}
+    exec(src[start:end], ns)
+    merge = ns["merge_candidates"]
+    p = _full_project(corpus)
+    p.candidates = [Candidate(name="Acme", website="https://acme.example", status="accepted",
+                              citations=[Citation(source_id="D1", quote="q", verified=True)]),
+                    Candidate(name="Beta", website="https://beta.example", status="accepted")]
+    a, b = p.candidates
+    df = pd.DataFrame([{"_id": a.uid, "status": "accepted", "name": "Acme Spaces", "website": "https://acme.example", "type": "direct"},
+                       {"_id": b.uid, "status": "accepted", "name": "Beta", "website": "https://beta-real.example", "type": "direct"}])
+    new_row = pd.DataFrame([{"_id": None, "status": None, "name": "Gamma", "website": float("nan"), "type": None}], index=[2])
+    out = merge(p, pd.concat([df, new_row]))
+    assert [c.name for c in out] == ["Acme Spaces", "Beta", "Gamma"]
+    assert out[0].citations and out[0].status == "edited"            # rename kept evidence, marked edited
+    assert out[2].status == "accepted" and out[2].website == ""      # added row: valid defaults, no None/NaN
+    assert p.record("Acme") is None and p.record("Beta") is None      # renamed / re-pointed research discarded
+    p.candidates = out
+    Project.model_validate_json(p.model_dump_json())                 # project still loads
+
+
+
+def test_gate1_delete_and_add_in_one_edit_does_not_transfer_evidence(corpus):
+    """Reviewer regression: delete the last row and add a new one -> the new row re-used the
+    deleted row's position and inherited its citations and approval."""
+    import pandas as pd
+    src = open("app.py", encoding="utf-8").read()
+    ns = {"pd": pd, "Candidate": Candidate, "Project": Project}
+    exec(src[src.index("STATUSES = ("): src.index("def apply_score_edits(")], ns)
+    p = Project(id="t", intake=Intake(client_name="C", product="p"))
+    p.candidates = [Candidate(name="A", status="accepted"),
+                    Candidate(name="Foo", status="accepted", citations=[Citation(source_id="D1", quote="Foo is great", verified=True)])]
+    # Streamlit: Foo deleted, Bar appended at the freed position 1, with no id
+    df = pd.DataFrame([{"_id": p.candidates[0].uid, "status": "accepted", "name": "A"},
+                       {"_id": None, "status": None, "name": "Bar"}])
+    out = ns["merge_candidates"](p, df)
+    bar = next(c for c in out if c.name == "Bar")
+    assert bar.citations == [] and bar.status == "accepted" and bar.uid != p.candidates[1].uid
+
+
+
+def test_quote_checker_second_review_cases():
+    page = ("Acme is the choice of many venues. It is not the market leader in Europe. Its plan does include SSO. "
+            "The company raised $5 million in 2019. Headquartered in Boston. " + "Filler text about other things. " * 20 +
+            "Acme also sells hotel event software.")
+    assert not quote_in_text("Its plan does not include SSO", page)                                   # negation flip
+    assert not quote_in_text("The company raised $50 million in 2019", page)                         # number flip
+    assert not quote_in_text("Acme is the ... market leader in Europe ... hotel event software", page)  # far-apart stitching
+    assert quote_in_text("It is not the market leader in Europe", page)
+    assert quote_in_text("Acme is the choice ... not the market leader in Europe", page)             # close parts ok
+    assert quote_in_text("Headquartered in Boston", page)                                            # 3-word fact
+    from ca_tool.research.corpus import snippet_url
+    line = "- Acme - Wikipedia: Acme is a venue software company based in Boston (https://en.wikipedia.org/wiki/Acme_(company))"
+    assert snippet_url(line, "Acme is a venue software company") == "https://en.wikipedia.org/wiki/Acme_(company)"
+
+
+def test_score_ids_trusted_when_the_model_rewords_names(corpus):
+    class Reworded(FakeLLM):
+        def generate_json(self, prompt, schema, system=""):
+            mk = lambda i, name, sc: {"id": i, "feature": name, "standard": True, "premium": None, "enterprise": None,
+                                     "score": sc, "rationale": "r", "confidence": "high",
+                                     "citations": [{"source_id": "S1", "quote": "build interactive 3D floor plans"}]}
+            data = {"scores": [mk("F1", "Artificial intelligence", 2), mk("F2", "Email campaigns", 4), mk("F3", "Reports", 3)]}
+            return schema.model_validate_json(json.dumps(data))
+    feats = [FeatureDef(category="X", name="AI"), FeatureDef(category="X", name="Email marketing"),
+             FeatureDef(category="X", name="Reporting")]
+    out = {f.feature: f.score for f in score.score(_record(corpus), feats, Intake(client_name="C", product="p"), Reworded())}
+    assert out == {"AI": 2.0, "Email marketing": 4.0, "Reporting": 3.0}
+
+
+def test_pilot_headcount_ranges_with_year_like_numbers():
+    from ca_tool.pilot import _emp_range
+    assert _emp_range("1001-2000 employees") == (1001, 2000)
+    assert _emp_range("2,000-5,000") == (2000, 5000)
+    assert _emp_range("~200 employees (LinkedIn, 2024)") == (200, 200)

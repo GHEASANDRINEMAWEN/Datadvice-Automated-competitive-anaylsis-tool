@@ -112,12 +112,17 @@ stays in the git-ignored `projects/<id>/outputs/`.
 
 | Measure | Result |
 |---|---|
-| Competitor discovery recall | 5 of 15 manual competitors in one run (1 before segment-aware discovery); 8 of the 9 core competitors found across runs. The 6 misses outside the core were new-vertical/corporate players the analysts added from client context |
-| Overview facts (year, HQ, geographies, headcount) | 11 of 16 agree; every disagreement had a verified quote (product-vs-parent company, sources disagreeing, headcount at a different date) |
-| Feature scores on the analysts' own 43 features | 119 compared: 39% exact, 70% within 1 point → 74% after the unsupported-zero rule |
+| Competitor discovery recall (per run) | 1, 4, 4, 5 of 15 manual competitors over four runs as discovery was improved. Six of the misses were new-vertical/corporate players the analysts likely added from client context the public intake lacks. Results vary noticeably between runs |
+| Overview facts (year, HQ, geographies, headcount) — strict match | **8 of 16** agree (an earlier, lenient matcher reported 11). Disagreements: product-vs-parent company, sources disagreeing, less specific answers, headcount at a different date |
+| Feature scores on the analysts' own 43 features | 119 compared: 39% exact, 70% within 1 point (74% after the unsupported-zero rule — measured on the same data the rule came from, so in-sample) |
 | … with a verified evidence quote | **79% within 1 point, no bias** (mean gap 0.84) |
 | … without one | 39% within 1 point, 1.8 points too low |
-| Quotes verified | 96% (131/137) |
+
+**Caveats:** one engagement, 4–5 competitors, manual work ~2 years older than the tool's sources
+(some differences are real market change). Treat these as directional; a second past engagement is
+needed to confirm them. A verified quote proves the quote is on the page, not that it supports the
+value — since this pilot, figures (years, counts, prices) must also appear in the quoted evidence.
+| Quotes verified | 89% (122/137) under the strict, word-for-word checker adopted after code review (96% under the earlier, looser one) |
 | Turnaround, 5 competitors | 25 min machine time (16 of it discovery, inflated by free-tier congestion) vs 56–72 working hours manually |
 
 Changes made because of the pilot: segment-aware discovery; a second "alternatives to X" and
@@ -125,6 +130,16 @@ completeness pass; client's former names excluded; search-result sources no long
 a 0 score without verified evidence becomes "?" (not found ≠ absent); Gate 3 surfaces the scores
 that need checking first. Still weak: run-to-run variation in discovery; vendors never found by
 search (fix: analyst adds them at Gate 1, or a paid search API); thin-evidence competitors.
+
+### Independent code review (2026-09-29)
+A separate reviewer audited the code; 12 defects were confirmed and fixed, then re-verified (one
+regression found in the fix and corrected). Most important: the quote checker could mark invented
+text as verified (invented endings, one-word edits that flip meaning or numbers, stitched fragments)
+— it is now word-for-word with gap-limited "…" parts; Gate 2 could silently overwrite re-run results
+with stale screen values; rejected competitors/content could still reach deliverables; scraped text
+could become live Excel formulas; scores could land on the wrong feature. Also: the app is bound to
+localhost only; figures in a value must appear in its quoted evidence; prompts treat page text as
+untrusted. 44 offline tests cover these cases.
 
 ### Next up
 - Headless browser fetch for JS-rendered pricing pages (biggest data gap seen so far)

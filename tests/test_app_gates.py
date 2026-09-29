@@ -35,8 +35,8 @@ def _button(at, prefix):
 def test_gate2_edit_reject_accept_and_approve(project):
     at = _open("gates")
     # edit one value, reject another, then save
-    at.text_area(key="v_Acme_headquarters").input("Austin, Texas, USA").run()
-    at.radio(key="s_Acme_description").set_value("rejected").run()
+    at.text_area(key="v_gates_Acme_0_headquarters").input("Austin, Texas, USA").run()
+    at.radio(key="s_gates_Acme_0_description").set_value("rejected").run()
     _button(at, "💾 Save decisions").click().run()
     assert not at.exception, [e.value for e in at.exception]
     rec = store.load("gates").record("Acme")
@@ -71,3 +71,34 @@ def test_gate3_scores_synthesis_and_export(project):
     assert not at.exception, [e.value for e in at.exception]
     labels = [b.label for b in at.get("download_button")]
     assert len(labels) == 3, labels
+
+
+def test_gate2_save_after_bulk_accept_keeps_the_acceptances(project):
+    """Reviewer #1: widgets used to keep stale values, so a Save after 'Accept all' undid it."""
+    at = _open("gates")
+    _button(at, "Accept all cells with verified evidence").click().run()
+    assert store.load("gates").record("Acme").cells["founding_year"].status == "accepted"
+    _button(at, "💾 Save decisions").click().run()           # same session, no changes made
+    assert not at.exception, [e.value for e in at.exception]
+    rec = store.load("gates").record("Acme")
+    assert rec.cells["founding_year"].status == "accepted"
+    assert all(c.status != "edited" for c in rec.cells.values())
+
+
+def test_gate3_explicit_reject_wins_over_edit():
+    """Reviewer #10 (the editable table can't be driven by AppTest, so the save rule is tested directly)."""
+    import pandas as pd
+    from ca_tool.models import FeatureScore
+    src = open("app.py", encoding="utf-8").read()
+    ns = {"pd": pd}
+    exec(src[src.index("def txt("): src.index("def merge_candidates(")], ns)
+    exec(src[src.index("def apply_score_edits("): src.index("def bump(")], ns)
+    fs = [FeatureScore(feature="A", category="c", score=4.0, rationale="r"),
+          FeatureScore(feature="B", category="c", score=3.0, rationale="r"),
+          FeatureScore(feature="C", category="c", score=2.0, rationale="r")]
+    ns["apply_score_edits"](fs, [{"score": 0.0, "context note": "r", "status": "rejected"},   # edited AND rejected
+                                 {"score": 5.0, "context note": "r", "status": "accepted"},   # edited
+                                 {"score": float("nan"), "context note": None, "status": "accepted"}])
+    assert (fs[0].status, fs[0].score) == ("rejected", 0.0)
+    assert (fs[1].status, fs[1].score) == ("edited", 5.0)
+    assert fs[2].score is None and fs[2].status == "edited"

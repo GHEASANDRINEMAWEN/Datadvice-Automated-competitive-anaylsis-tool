@@ -32,7 +32,9 @@ def search(query: str, max_results: int = 8) -> list[SearchHit]:
     for attempt in range(3):
         try:
             rows = DDGS().text(query, max_results=max_results) or []
-            return [SearchHit(r.get("title", ""), r.get("href", ""), r.get("body", "")) for r in rows if r.get("href")]
+            # one line per result in the snippet bundles: no newlines inside title/snippet
+            one = lambda x: re.sub(r"\s+", " ", x or "").strip()
+            return [SearchHit(one(r.get("title")), r.get("href", ""), one(r.get("body"))) for r in rows if r.get("href")]
         except Exception as e:  # ddgs raises on rate limit / no results
             if "no results" in str(e).lower():
                 return []  # a genuine empty result: retrying won't change it

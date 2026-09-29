@@ -50,20 +50,65 @@ class Corpus:
             src = self.get(c.source_id.strip("[] "))
             if not src:
                 continue
-            url = snippet_url(src.text, c.quote) if src.url.startswith("search://") else src.url
-            out.append(Citation(source_id=src.id, url=url or src.url, quote=c.quote,
-                                verified=quote_in_text(c.quote, src.text)))
+            if src.url.startswith("search://"):
+                # a search bundle holds many unrelated results: the quote must sit inside ONE of
+                # them (no stitching across results), and the citation points at that result's page
+                url = snippet_url(src.text, c.quote)
+                ok = bool(url)
+            else:
+                url, ok = src.url, quote_in_text(c.quote, src.text)
+            out.append(Citation(source_id=src.id, url=url or src.url, quote=c.quote, verified=ok))
         return out
+
+
+def verify(src: Source | None, quote: str) -> bool:
+    """The single rule for 'is this quote really in this source?' (used live and on re-check)."""
+    if not src:
+        return False
+    if src.url.startswith("search://"):
+        return bool(snippet_url(src.text, quote))
+    return quote_in_text(quote, src.text)
 
 
 def snippet_url(snippets: str, quote: str) -> str:
     """Search-snippet sources hold one result per line ending in '(url)'; return the URL of the
     line that contains the quote, so the citation points at the real page."""
     for line in snippets.splitlines():
-        m = re.search(r"\((https?://[^)\s]+)\)\s*$", line)
-        if m and quote_in_text(quote, line):
-            return m.group(1)
+        i = line.rfind(" (http")
+        if i < 0 or not line.rstrip().endswith(")"):
+            continue
+        url = line[i + 2: line.rstrip().rfind(")")]
+        if quote_in_text(quote, line[:i]):
+            return url
     return ""
+
+
+_NUM = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _numbers(text: str) -> set[float]:
+    """Significant figures in a text: years, counts, prices ('$9.00' == '9', '3,601' == 3601).
+    Single digits are ignored (too common to be evidence)."""
+    out = set()
+    for m in _NUM.findall(text or ""):
+        try:
+            v = float(m.replace(",", ""))
+        except ValueError:
+            continue
+        if v >= 10:
+            out.add(v)
+    return out
+
+
+def numbers_supported(value: str, quotes: list[str]) -> bool | None:
+    """Does at least one figure in the value appear in the quoted evidence? None when the value
+    has no figures. Catches a real quote that doesn't back the number (e.g. a founding year taken
+    from the model's memory next to a quote that never mentions it)."""
+    vals = _numbers(value)
+    if not vals:
+        return None
+    quoted = set().union(*(_numbers(q) for q in quotes)) if quotes else set()
+    return bool(vals & quoted)
 
 
 _ELLIPSIS = re.compile(r"\s*(?:\.\.\.|…|\[\.\.\.\])\s*")
@@ -76,25 +121,30 @@ def _norm(s: str) -> str:
     return s.strip()
 
 
-def quote_in_text(quote: str, text: str, chunk_words: int = 6, threshold: float = 0.8) -> bool:
-    """True if the quote appears in the text. Punctuation/case/bullets are ignored; an ellipsis
-    splits the quote into parts that must each appear in order; otherwise ≥80% of 6-word chunks
-    must appear (tolerates tiny edits, rejects invented quotes)."""
-    t = _norm(text)
+MIN_PART_WORDS = 3      # a quote, and each "…"-separated part of it, must be a real phrase
+MAX_GAP = 250           # "…" may skip at most this much text: parts must come from the same passage
+
+
+def quote_in_text(quote: str, text: str) -> bool:
+    """True if the quote appears in the text word for word (case, punctuation and list bullets
+    ignored; whole words only). No word may differ: tolerating even one edit let "does not include"
+    pass for "does include" and "$50 million" for "$5 million". An ellipsis splits the quote into
+    parts that must appear in order, each within MAX_GAP characters of the previous one. A part
+    needs ≥3 words, or ≥2 when it carries a figure ("founded 2011")."""
+    t = f" {_norm(text)} "
     parts = [_norm(x) for x in _ELLIPSIS.split(quote) if _norm(x)]
-    if not parts or sum(len(x) for x in parts) < 12:
+    has_fig = lambda x: bool(re.search(r"\d{2,}", x))
+    if not parts or any(len(p.split()) < (2 if has_fig(p) else MIN_PART_WORDS) for p in parts):
         return False
-    pos, in_order = 0, True
-    for part in parts:
-        i = t.find(part, pos)
-        if i < 0:
-            in_order = False
-            break
-        pos = i + len(part)
-    if in_order:
-        return True
-    words = " ".join(parts).split()
-    if len(words) < chunk_words:
+
+    def place(k: int, lo: int, hi: int) -> bool:
+        needle = f" {parts[k]} "
+        i = t.find(needle, lo)
+        while i >= 0 and i <= hi:
+            end = i + len(needle) - 1
+            if k == len(parts) - 1 or place(k + 1, end, end + MAX_GAP):
+                return True
+            i = t.find(needle, i + 1)
         return False
-    chunks = [" ".join(words[i:i + chunk_words]) for i in range(0, len(words) - chunk_words + 1, chunk_words)]
-    return sum(1 for c in chunks if c in t) / len(chunks) >= threshold
+
+    return place(0, 0, len(t))

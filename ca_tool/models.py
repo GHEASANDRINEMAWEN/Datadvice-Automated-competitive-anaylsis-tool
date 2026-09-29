@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Literal, Optional
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -63,6 +64,7 @@ class Intake(BaseModel):
 
 
 class Candidate(BaseModel):
+    uid: str = Field(default_factory=lambda: uuid4().hex[:12])   # stable id: survives renames and table edits
     name: str
     website: str = ""
     type: CompetitorType = "direct"
@@ -147,6 +149,15 @@ class Project(BaseModel):
 
     def record(self, name: str) -> Optional[CompetitorRecord]:
         return next((c for c in self.competitors if c.name == name), None)
+
+    def active(self) -> list[CompetitorRecord]:
+        """Researched competitors still approved at Gate 1. Later stages and every deliverable use
+        only these, so a competitor rejected or removed after research never reaches the client.
+        (Projects without a candidate list, e.g. imported data, keep all records.)"""
+        if not self.candidates:
+            return list(self.competitors)
+        ok = {c.name for c in self.candidates if c.status in ("accepted", "edited")}
+        return [r for r in self.competitors if r.name in ok]
 
     def add_log(self, msg: str) -> None:
         self.log.append(f"{now()} {msg}")
